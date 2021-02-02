@@ -3,7 +3,7 @@ import NIO
 import MongoSwift
 import Logging
 
-typealias GenericFunction = (Any)->EventLoopFuture<Void>
+typealias GenericFunction = (Any) -> EventLoopFuture<Void>
 typealias Document = BSONDocument
 
 struct Subscription: Identifiable {
@@ -40,7 +40,7 @@ extension Subscription{
 
 public final class Client {
     
-    private let connection: MongoClient
+    public let connection: MongoClient
     private let database: MongoDatabase
     private let eventLoop: EventLoop
     private let clientName: String
@@ -58,7 +58,14 @@ public final class Client {
         subscriptions.values.first(where: {$0.recovering}) != nil
     }
     
-    public init(dbURI: String, dbName: String, as clientName: String, eventLoop: EventLoop) throws{
+    public init(connection: MongoClient, dbName: String, as clientName: String, eventLoop: EventLoop, useTransactions: Bool? = true) {
+        self.eventLoop = eventLoop
+        self.clientName = clientName
+        self.connection = connection
+        self.database = connection.db(dbName)
+    }
+
+    public init(dbURI: String, dbName: String, as clientName: String, eventLoop: EventLoop, useTransactions: Bool? = true) throws {
         self.eventLoop = eventLoop
         self.clientName = clientName
         self.connection = try MongoClient(dbURI, using: self.eventLoop)
@@ -89,7 +96,7 @@ public final class Client {
             }
     }
     
-    private func writeAck<T>(for event: EventModel<T>) -> EventLoopFuture<UpdateResult?>{
+    private func writeAck<T>(for event: EventModel<T>) -> EventLoopFuture<UpdateResult?> {
         let query: BSONDocument = ["_id": event._id]
         
         let ack: BSON = .init(stringLiteral: self.clientName)
@@ -100,7 +107,7 @@ public final class Client {
         )
     }
     
-    private func watch<T: Codable>(_ collection: MongoCollection<Document>, of: T.Type) -> EventLoopFuture<Void>{
+    private func watch<T: Codable>(_ collection: MongoCollection<Document>, of: T.Type) -> EventLoopFuture<Void> {
         
          collection.watch(withFullDocumentType: EventModel<T>.self).flatMap { watcher in
             watcher.forEach{ notification in
@@ -182,16 +189,19 @@ public final class Client {
         return watcher
     }
     
-    public static func publish<T>(_ object: T, broker: Client, to topic: String) -> EventLoopFuture<Void> where T: Codable{
+    public static func publish<T>(_ object: T, broker: Client, to topic: String) -> EventLoopFuture<Void> where T: Codable {
         
         let collection = broker.database.collection(topic)
         let event = EventModel(topic: topic, payload: object, expireIn: broker.defaultTTL)
-        let document = try! BSONEncoder().encode(event)
-        
-        return collection.insertOne(document).map{ _ in print("Sent message on: \(topic)") }
+        return broker.eventLoop.submit {
+            try BSONEncoder().encode(event)
+        }
+        .flatMap { document in
+            collection.insertOne(document).map{ _ in print("Sent message on: \(topic)") }
+        }
     }
     
-    public func publish<T>(_ object: T, to topic: String) -> EventLoopFuture<Void>  where T: Codable{
+    public func publish<T>(_ object: T, to topic: String) -> EventLoopFuture<Void>  where T: Codable {
         Client.publish(object, broker: self, to: topic)
     }
     
