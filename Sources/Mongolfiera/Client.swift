@@ -77,20 +77,20 @@ public final class Client {
     }
     
     private func handle<T>(_ event: EventModel<T>) throws -> EventLoopFuture<Void>{
-        guard let subscription = self.subscriptions[event.topic] else{
+        guard let subscription = self.subscriptions[event.topic] else {
             throw Subscription.topicNotFound()
         }
         
-        let promises = subscription.actions.map{ action in
+        let promises = subscription.actions.map { action in
             return action(event.payload)
         }
         
          return self.executionStrategy.exec(promises, on: self.eventLoop)
-            .flatMap{ _ -> EventLoopFuture<UpdateResult?> in
+            .flatMap { _ -> EventLoopFuture<UpdateResult?> in
                 self.writeAck(for: event)
-            }.map{ (result: UpdateResult?) in
+            }.map { (result: UpdateResult?) in
                 print("Ack sent for \(event.topic)")
-            }.flatMapErrorThrowing{ error in
+            }.flatMapErrorThrowing { error in
                 print(error.localizedDescription)
                 throw error
             }
@@ -118,7 +118,7 @@ public final class Client {
                     return
                 }
                                 
-                try! self.handle(event).wait()
+                try? self.handle(event).wait()
                 
             }.flatMap{
                 watcher.kill()
@@ -134,15 +134,23 @@ public final class Client {
         return self.database.collection(topic)
             .find(query)
             .flatMap { (cursor: MongoCursor<BSONDocument>) in
-                cursor.forEach{ document in
-                    guard let data = try? BSONEncoder().encode(document),
-                          let event = try? BSONDecoder().decode(EventModel<T>.self, from: data) else {
-                        return
-                    }
-                    try self.handle(event).wait()
-                }.flatMap { _ in
-                    cursor.kill()
+                cursor.toArray().flatMap { array in cursor.kill().map { array } }
+            }
+            .map { events in 
+                events.map { event in 
+                    guard let data = try? BSONEncoder().encode(event),
+                          let toReturn = try? BSONDecoder().decode(EventModel<T>.self, from: data)
+                    else { return nil }
+                    return toReturn      
                 }
+                .filter { event in event != nil }
+                .map { event in event! }
+            }
+            .map { (events: [EventModel<T>]) in 
+                events.map { event in do { return try self.handle(event) } catch { return self.eventLoop.makeSucceededFuture( ( ) ) } }
+            }
+            .flatMap { (executions: [EventLoopFuture<Void>]) in
+                EventLoopFuture.whenAllSucceed(executions, on: self.eventLoop).map { _ in ( ) }
             }
     }
     
@@ -164,7 +172,7 @@ public final class Client {
         }
     }
     
-    public func subscribe<T>(to topic: String, action: @escaping (T) -> EventLoopFuture<Void>) -> EventLoopFuture<Void> where T: Codable{
+    public func subscribe<T>(to topic: String, action: @escaping (T) -> EventLoopFuture<Void>) -> EventLoopFuture<Void> where T: Codable {
         let collection = self.database.collection(topic)
         
         let anyFunction: (Any) -> EventLoopFuture<Void> = { object in
@@ -176,17 +184,19 @@ public final class Client {
             self.subscriptions[topic] = Subscription(topic: topic)
         }
         
-        let recover = self.recoverEvents(on: topic, as: T.self)
-        let watcher = self.watch(collection, of: T.self)
-        
-        watcher.whenComplete{ _ in self.subscriptions[topic]?.watchers.removeAll(where: {$0 == watcher}) }
-        recover.whenComplete{ _ in self.subscriptions[topic]?.recovers.removeAll(where: {$0 == recover}) }
-
         self.subscriptions[topic]?.actions.append(anyFunction)
+
+        let recover = self.recoverEvents(on: topic, as: T.self)
+        let watcher = self.watch(collection, of: T.self) 
+
+        
+        // watcher.whenComplete{ _ in self.subscriptions[topic]?.watchers.removeAll(where: {$0 == watcher}) }
+        // recover.whenComplete{ _ in self.subscriptions[topic]?.recovers.removeAll(where: {$0 == recover}) }
+
         self.subscriptions[topic]?.recovers.append(recover)
         self.subscriptions[topic]?.watchers.append(watcher)
         
-        return watcher
+        return recover.flatMap { watcher }
     }
     
     public static func publish<T>(_ object: T, broker: Client, to topic: String) -> EventLoopFuture<Void> where T: Codable {
