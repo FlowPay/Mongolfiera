@@ -199,6 +199,8 @@ public final class Client {
         .flatMap { document in
             collection.insertOne(document)
         }
+        .map{ _ in 
+        }
     }
     
     public func publish<T>(_ object: T, to topic: String) -> EventLoopFuture<Void>  where T: Codable {
