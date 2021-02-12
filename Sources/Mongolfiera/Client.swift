@@ -207,7 +207,9 @@ public final class Client {
             try BSONEncoder().encode(event)
         }
         .flatMap { document in
-            collection.insertOne(document).map{ _ in print("Sent message on: \(topic)") }
+            collection.insertOne(document)
+        }
+        .map{ _ in 
         }
     }
     
