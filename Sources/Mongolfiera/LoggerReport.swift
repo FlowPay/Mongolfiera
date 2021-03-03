@@ -9,7 +9,7 @@ import Logging
 import Foundation
 import MongoSwift
 
-private extension Logger {
+internal extension Logger {
     /// Reports an `Error` to this `Logger`.
     ///
     /// - parameters:
