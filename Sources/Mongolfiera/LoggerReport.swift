@@ -9,12 +9,12 @@ import Logging
 import Foundation
 import MongoSwift
 
-extension Logger {
+private extension Logger {
     /// Reports an `Error` to this `Logger`.
     ///
     /// - parameters:
     ///     - error: `Error` to log.
-    public func report(
+    func report(
         error: Error,
         file: String = #file,
         function: String = #function,
