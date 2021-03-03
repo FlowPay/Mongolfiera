@@ -37,7 +37,7 @@ final class MongolFieraTests: XCTestCase {
     
     func connect(as name: String = "MongolfieraTest-\(UUID().uuidString)", on loop: EventLoop? = nil) -> Client{
         let client = try! Client(
-                dbURI: "mongodb://192.168.2.55:30000/?replicaSet=rs0",
+                dbURI: "mongodb://192.168.1.15:30000/?replicaSet=rs0",
                 dbName: "test",
                 as: name,
                 eventLoop: loop != nil ? loop! : MultiThreadedEventLoopGroup(numberOfThreads: System.coreCount).next())
@@ -230,6 +230,20 @@ final class MongolFieraTests: XCTestCase {
         
         waitForExpectations(timeout: TimeInterval(attemps * min(1, delayMillis/1000) + 60))
         XCTAssertEqual(uuids.sorted(), uuidsTest.sorted())
+    }
+    
+    
+    func testWrongModel() throws {
+        let exp = expectation(description: "Waiting for approval")
+        let client = connect(as: "MongolfieraTest-WrongModel")
+        client.subscribe(to: "invoice/approval/request") { (event: String) in
+            print(event)
+            exp.fulfill()
+            return MultiThreadedEventLoopGroup.init(numberOfThreads: 1).next().makeSucceededFuture(())
+        }
+        
+        connect(as: "MongolfieraTest-WrongModel").publish(TestPayload(), to: "invoice/approval/request")
+        waitForExpectations(timeout: 10)
     }
 
 }
