@@ -60,6 +60,21 @@ public final class Client {
         subscriptions.values.first(where: {$0.recovering}) != nil
     }
     
+    let encoder: BSONEncoder = {
+        let bsonEncoder = BSONEncoder()
+        bsonEncoder.dateEncodingStrategy = .iso8601
+        bsonEncoder.uuidEncodingStrategy = .deferredToUUID
+        return bsonEncoder
+    }()
+    
+    
+    let decoder: BSONDecoder = {
+        let bsonDecoder = BSONDecoder()
+        bsonDecoder.dateDecodingStrategy = .iso8601
+        bsonDecoder.uuidDecodingStrategy = .deferredToUUID
+        return bsonDecoder
+    }()
+    
     public init(connection: MongoClient, dbName: String, as clientName: String, eventLoop: EventLoop, useTransactions: Bool? = true) {
         self.eventLoop = eventLoop
         self.clientName = clientName
@@ -81,18 +96,24 @@ public final class Client {
     
     private func decodeDocument<T: Codable>(_ document: BSONDocument) throws -> EventModel<T> {
         do {
-            return try BSONDecoder().decode(EventModel<T>.self, from: document.toData())
+            return try self.decoder.decode(EventModel<T>.self, from: document.toData())
         }catch {
-            guard let payload = document["payload"],
-                  let jsonString = (T.self == String.self) ? payload.documentValue?.toCanonicalExtendedJSONString() : payload.stringValue,
-                  let newPayload: BSON = (T.self == String.self) ? .string(jsonString) : .document(try .init(fromJSON: jsonString))
+            
+            let encoder = BSONEncoder()
+            encoder.dateEncodingStrategy = .iso8601
+            encoder.uuidEncodingStrategy = .deferredToUUID
+            
+            guard
+                let payload = document["payload"],
+                let jsonString = (T.self == String.self) ? payload.documentValue?.toExtendedJSONString() : payload.stringValue,
+                let newPayload: BSON = (T.self == String.self) ? .string(jsonString) : .document(try .init(fromJSON: jsonString))
             else { throw  DecodingError.typeMismatch(T.self, DecodingError.Context.init(codingPath: [], debugDescription: "")) }
             
             
             var tempDocument = document
             tempDocument["payload"] = newPayload
             
-            return try BSONDecoder().decode(EventModel<T>.self, from: tempDocument.toData())
+            return try self.decoder.decode(EventModel<T>.self, from: tempDocument.toData())
         }
         
     }
@@ -141,7 +162,7 @@ public final class Client {
                           let acks = document["acks"]?.arrayValue,
                           !acks.contains(.string(self.clientName))
                     else { return }
-
+                    
                     let event: EventModel<T> = try self.decodeDocument(document)
                     
                     try self.handle(event).wait()
@@ -250,7 +271,7 @@ public final class Client {
         let collection = broker.database.collection(topic)
         let event = EventModel(topic: topic, payload: object, expireIn: broker.defaultTTL)
         return broker.eventLoop.submit {
-            try BSONEncoder().encode(event)
+            try broker.encoder.encode(event)
         }
         .flatMap { document in
             collection.insertOne(document)

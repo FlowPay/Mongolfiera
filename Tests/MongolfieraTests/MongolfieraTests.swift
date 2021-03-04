@@ -28,6 +28,13 @@ final class MongolFieraTests: XCTestCase {
     
     class TestPayload: Codable{
         let test: String
+        var int: Int = 6
+        var float: Float = 6.6
+        var double: Double = 6.66
+        var uuid: UUID = UUID()
+        var date: Date = Date()
+        var bool: Bool = true
+
         //        let number: Int
         init() {
             self.test = UUID().uuidString
@@ -37,7 +44,7 @@ final class MongolFieraTests: XCTestCase {
     
     func connect(as name: String = "MongolfieraTest-\(UUID().uuidString)", on loop: EventLoop? = nil) -> Client{
         let client = try! Client(
-                dbURI: "mongodb://192.168.1.15:30000/?replicaSet=rs0",
+                dbURI: "mongodb://sql1.intra.bancodigitale.com:30000/?replicaSet=rs0",
                 dbName: "test",
                 as: name,
                 eventLoop: loop != nil ? loop! : MultiThreadedEventLoopGroup(numberOfThreads: System.coreCount).next())
@@ -65,14 +72,10 @@ final class MongolFieraTests: XCTestCase {
         }.map{ _ in
             print("Subscription closed")
         }
-        
-        XCTAssertTrue(client.recovering)
-        
+                
         self.publishTest(test: testObject)
         
         waitForExpectations(timeout: 10)
-        
-        XCTAssertFalse(client.recovering)
     }
     
     func testRecover(){
@@ -95,8 +98,6 @@ final class MongolFieraTests: XCTestCase {
             exp.fulfill()
         }
         waitForExpectations(timeout: 10)
-        XCTAssertFalse(client.recovering)
-
     }
     
     func testRecoverWithoutPublish() throws{
@@ -164,7 +165,7 @@ final class MongolFieraTests: XCTestCase {
         ]
         
         
-        let database: MongoDatabase = try! MongoClient("mongodb://localhost:30000/?replicaSet=rs0", using: self.loop!).db("test")
+        let database: MongoDatabase = try! MongoClient("mongodb://sql1.intra.bancodigitale.com:30000/?replicaSet=rs0", using: self.loop!).db("test")
                 
         let collection = database.collection("lib/test")
         let _ = collection.findOne(query).whenComplete{ result in
@@ -236,10 +237,17 @@ final class MongolFieraTests: XCTestCase {
     func testWrongModel() throws {
         let exp = expectation(description: "Waiting for approval")
         let client = connect(as: "MongolfieraTest-WrongModel")
+        
         client.subscribe(to: "invoice/approval/request") { (event: String) in
-            print(event)
-            exp.fulfill()
-            return MultiThreadedEventLoopGroup.init(numberOfThreads: 1).next().makeSucceededFuture(())
+            
+            return MultiThreadedEventLoopGroup.init(numberOfThreads: 1).next().submit{
+                print(event)
+                let payload = try JSONDecoder().decode(TestPayload.self, from: event.data(using: .utf8)!)
+                print(payload)
+                exfp.fulfill()
+                return
+            }
+
         }
         
         connect(as: "MongolfieraTest-WrongModel").publish(TestPayload(), to: "invoice/approval/request")
