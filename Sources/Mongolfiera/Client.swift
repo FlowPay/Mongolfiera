@@ -16,7 +16,7 @@ public final class Client {
     
     public var defaultTTL: TimeInterval = 300
     public var executionStrategy: ExecutionStrategy = .failSlow
-    public var clusterStrategy: ClusterStrategy = .none
+    public var clusterStrategy: ClusterStrategy = .allSubscribed
     
     public var logger: Logger = .init(label: "MongoDB-Broker")
     
@@ -73,7 +73,6 @@ public final class Client {
                 let newPayload: BSON = (T.self == String.self) ? .string(jsonString) : .document(try .init(fromJSON: jsonString))
             else { throw  DecodingError.typeMismatch(T.self, DecodingError.Context.init(codingPath: [], debugDescription: "")) }
             
-            
             var tempDocument = document
             tempDocument["payload"] = newPayload
             
@@ -95,9 +94,11 @@ public final class Client {
         }
         .flatMap { _ -> EventLoopFuture<UpdateResult?> in
             self.writeAck(for: event)
-        }.map { (result: UpdateResult?) in
-            self.logger.debug("Ack sent for \(event.topic)")
-        }.flatMapErrorThrowing { error in
+        }
+        .map { (result: UpdateResult?) in
+            self.logger.debug("Ack sent for \(event._id.objectIDValue?.description ?? "") on \(event.topic)")
+        }
+        .flatMapErrorThrowing { error in
             self.logger.report(error: error)
             throw error
         }
@@ -199,7 +200,7 @@ public final class Client {
                 events.map { self.handle($0) }
             }
             .flatMap { (executions: [EventLoopFuture<Void>]) in
-                self.executionStrategy.exec(executions, on: self.eventLoop)
+                EventLoopFuture.whenAllComplete(executions, on: self.eventLoop)
             }
             .map { _ in }
     }
@@ -222,6 +223,7 @@ public final class Client {
         }
     }
     
+    @discardableResult
     public func subscribe<T>(to topic: String, action: @escaping (T) -> EventLoopFuture<Void>) -> EventLoopFuture<Void> where T: Codable {
         let collection = self.database.collection(topic)
         

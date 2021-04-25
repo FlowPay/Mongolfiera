@@ -28,7 +28,11 @@ extension Client {
             .findOneAndUpdate(filter: filterQuery, update: updateQuery)
             .flatMapThrowing{ document in
                 guard let document = document
-                else { throw ChallengeError(topic: event.topic, eventID: event._id.stringValue) }
+                else {
+                    let error = ChallengeError(topic: event.topic, eventID: event._id.objectIDValue?.description)
+                    self.logger.report(error: error)
+                    throw error
+                }
                 return try self.decodeDocument(document)
             }
     }

@@ -38,6 +38,8 @@ internal extension Logger {
             reason = "Failure:\n\(labeled.failureReason ?? "")\n\nDescription:\n\(labeled.errorDescription ?? "")\n\nRecovery:\(labeled.recoverySuggestion ?? "")"
         case let decoding as DecodingError:
             reason = "\(decoding)"
+        case let challenge as ChallengeError:
+            reason = "Challenge failed for event \(challenge.eventID ?? "") on \(challenge.topic ?? "")"
         default:
             reason = "\(error)"
         }
