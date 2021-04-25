@@ -34,7 +34,7 @@ final class MongolFieraTests: XCTestCase {
         var uuid: UUID = UUID()
         var date: Date = Date()
         var bool: Bool = true
-
+        
         //        let number: Int
         init() {
             self.test = UUID().uuidString
@@ -44,10 +44,10 @@ final class MongolFieraTests: XCTestCase {
     
     func connect(as name: String = "MongolfieraTest-\(UUID().uuidString)", on loop: EventLoop? = nil) -> Client{
         let client = try! Client(
-                dbURI: "mongodb://sql1.intra.bancodigitale.com:30000/?replicaSet=rs0",
-                dbName: "test",
-                as: name,
-                eventLoop: loop != nil ? loop! : MultiThreadedEventLoopGroup(numberOfThreads: System.coreCount).next())
+            dbURI: "mongodb://sql1.intra.bancodigitale.com:30000/?replicaSet=rs0",
+            dbName: "test",
+            as: name,
+            eventLoop: loop != nil ? loop! : MultiThreadedEventLoopGroup(numberOfThreads: System.coreCount).next())
         
         self.clients.append(client)
         return client
@@ -72,7 +72,7 @@ final class MongolFieraTests: XCTestCase {
         }.map{ _ in
             print("Subscription closed")
         }
-                
+        
         self.publishTest(test: testObject)
         
         waitForExpectations(timeout: 10)
@@ -103,18 +103,15 @@ final class MongolFieraTests: XCTestCase {
     func testRecoverWithoutPublish() throws{
         let exp = expectation(description: "Recovering")
         
-        let event: EventModel<String> = EventModel(topic: "lib/test-recovered-np", payload: "hello")
+        let event: Event<String> = Event(topic: "lib/test-recovered-np", payload: "hello")
         
-        let connection = try MongoClient("mongodb://192.168.2.55:30000/?replicaSet=rs0", using: self.loop!)
-        let db = connection.db("test")
-        _ = db.createCollection("lib/test-recovered-np")
-        let collection = db.collection("lib/test-recovered-np")
+        let connection = self.connect()
+        _ = connection.database.createCollection("lib/test-recovered-np")
+        let collection = connection.database.collection("lib/test-recovered-np")
         
         let data = try BSONEncoder().encode(event)
         _ = try collection.insertOne(data).wait()
-        
-        try connection.syncClose()
-        
+                
         let client = connect(as: "Mongolfiera-RecoveringNPTest")
         
         _ = client.subscribe(to: "lib/test-recovered-np"){ (payload: String) in
@@ -125,64 +122,6 @@ final class MongolFieraTests: XCTestCase {
         }
         
         waitForExpectations(timeout: 10)
-
-    }
-    
-    func testConcurrencyRead(){
-        let exp = expectation(description: "Wait for acks")
-        let attemps = 2
-        let payloadTest = TestPayload()
-        
-        var acksForTest = (1...attemps).map{ index in "MongolfieraTest-\(index)-\(payloadTest.test)" }
-        
-        exp.expectedFulfillmentCount = attemps
-        
-        for index in 1...attemps{
-            let newLoop = MultiThreadedEventLoopGroup(numberOfThreads: System.coreCount).next()
-            newLoop.execute{
-                let client = self.connect(as: "MongolfieraTest-\(index)-\(payloadTest.test)", on: newLoop)
-                self.clients.append(client)
-                client.subscribe(to: "lib/test"){ (result: TestPayload) in
-                    if result.test == payloadTest.test{
-                        client.unsubscribe(from: "lib/test")
-                        exp.fulfill()
-                    }
-                    return self.loop!.next().makeSucceededFuture(())
-                }
-               
-            }
-        }
-        
-        publishTest(test: payloadTest)
-        
-        
-        waitForExpectations(timeout: TimeInterval(attemps + 50))
-        
-        let query: BSONDocument = [
-            "payload":  [
-                "test": BSON.init(stringLiteral: payloadTest.test)
-            ]
-        ]
-        
-        
-        let database: MongoDatabase = try! MongoClient("mongodb://sql1.intra.bancodigitale.com:30000/?replicaSet=rs0", using: self.loop!).db("test")
-                
-        let collection = database.collection("lib/test")
-        let _ = collection.findOne(query).whenComplete{ result in
-            print("Found: \(result)")
-            
-            guard  let document = try? result.get(),
-                   let data = try? BSONEncoder().encode(document),
-                   var event = try? BSONDecoder().decode(EventModel<TestPayload>.self, from: data) else {
-                XCTFail()
-                return
-            }
-            
-            XCTAssertEqual(event.payload.test, payloadTest.test)
-            event.acks.sort()
-            acksForTest.sort()
-            XCTAssertEqual(event.acks, acksForTest)
-        }
         
     }
     
@@ -206,7 +145,7 @@ final class MongolFieraTests: XCTestCase {
             uuidsTest.append(result.test)
             exp.fulfill()
             return self.loop!.next().makeSucceededFuture(())
-
+            
         }
         
         var counter = 0
@@ -237,21 +176,88 @@ final class MongolFieraTests: XCTestCase {
     func testWrongModel() throws {
         let exp = expectation(description: "Waiting for approval")
         let client = connect(as: "MongolfieraTest-WrongModel")
+        client.clusterStrategy = .none
         
         client.subscribe(to: "invoice/approval/request") { (event: String) in
             
-            return MultiThreadedEventLoopGroup.init(numberOfThreads: 1).next().submit{
-                print(event)
-                let payload = try JSONDecoder().decode(TestPayload.self, from: event.data(using: .utf8)!)
-                print(payload)
-                exfp.fulfill()
+            let promise = MultiThreadedEventLoopGroup.init(numberOfThreads: 1).next().submit{
+                client.logger.debug(.init(stringLiteral: event))
+                let decoder = JSONDecoder()
+                decoder.dateDecodingStrategy = .iso8601
+                _ = try decoder.decode(TestPayload.self, from: event.data(using: .utf8)!)
                 return
             }
-
+            .recover{ error in
+                client.logger.report(error: error)
+                assertionFailure("\(error)")
+                return
+            }
+            promise.whenComplete{ _ in exp.fulfill()}
+            
+            return promise
         }
         
-        connect(as: "MongolfieraTest-WrongModel").publish(TestPayload(), to: "invoice/approval/request")
+        _ = try connect(as: "MongolfieraTest-WrongModel").publish(TestPayload(), to: "invoice/approval/request").wait()
+        
         waitForExpectations(timeout: 10)
     }
-
+    
+    func testNotInCluster() throws {
+        let clientsNumber = 10
+        
+        let clients: [Client] = (0..<clientsNumber).map { index in
+            let client = self.connect(as: "pod")
+            client.clusterStrategy = .none
+            return client
+        }
+        
+        var counter = 0
+        
+        clients.forEach{
+            _ = $0.subscribe(to: "test/cluster", action: { (_: String) in
+                counter = counter + 1
+                return self.loop!.makeSucceededVoidFuture()
+            })
+        }
+        
+        try self.connect().publish("hellp", to: "test/cluster").wait()
+        
+        let exp = expectation(description: "Waiting pods")
+        Timer.scheduledTimer(withTimeInterval: TimeInterval(clientsNumber) * 0.5, repeats: false) { _ in
+            exp.fulfill()
+        }
+        
+        waitForExpectations(timeout: TimeInterval(clientsNumber))
+        
+        XCTAssertEqual(counter, clientsNumber)
+    }
+    
+    func testCluster() throws {
+        let clientsNumber = 10
+        
+        let clients: [Client] = (0..<clientsNumber).map { _ in
+            return self.connect(as: "pod")
+        }
+        
+        var counter = 0
+        
+        clients.forEach{
+            _ = $0.subscribe(to: "test/cluster", action: { (_: String) in
+                counter = counter + 1
+                return self.loop!.makeSucceededVoidFuture()
+            })
+        }
+        
+        try self.connect().publish("hellp", to: "test/cluster").wait()
+        
+        let exp = expectation(description: "Waiting pods")
+        Timer.scheduledTimer(withTimeInterval: 5.0, repeats: false) { _ in
+            exp.fulfill()
+        }
+        
+        waitForExpectations(timeout: 10)
+        
+        XCTAssertEqual(counter, 1)
+    }
+    
 }

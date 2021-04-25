@@ -3,52 +3,20 @@ import NIO
 import MongoSwift
 import Logging
 
-typealias GenericFunction = (Any) -> EventLoopFuture<Void>
 typealias Document = BSONDocument
-
-struct Subscription: Identifiable {
-    
-    public let topic: String
-    
-    var recovers: [EventLoopFuture<Void>] = []
-    var watchers: [EventLoopFuture<Void>] = []
-    var actions: [GenericFunction] = []
-    
-    var watching: Bool {
-        watchers.count > 0
-    }
-    
-    var recovering: Bool {
-        recovers.count > 0
-    }
-    
-    public var id: Int {
-        return self.topic.hashValue
-    }
-    
-    public init(topic: String){
-        self.topic = topic
-    }
-    
-}
-
-extension Subscription{
-    private class AlreadyStartedError: Error { }
-    private class NotStartedError: Error { }
-    public class topicNotFound: Error { }
-}
 
 public final class Client {
     
     public let connection: MongoClient
-    private let database: MongoDatabase
-    private let eventLoop: EventLoop
-    private let clientName: String
+    internal let database: MongoDatabase
+    internal let eventLoop: EventLoop
+    internal let clientName: String
     
-    private var subscriptions: [String : Subscription] = [:]
+    internal var subscriptions: [String : Subscription] = [:]
     
-    public var defaultTTL = 300
+    public var defaultTTL: TimeInterval = 300
     public var executionStrategy: ExecutionStrategy = .failSlow
+    public var clusterStrategy: ClusterStrategy = .allSubscribed
     
     public var logger: Logger = .init(label: "MongoDB-Broker")
     
@@ -94,14 +62,10 @@ public final class Client {
     }
     
     
-    private func decodeDocument<T: Codable>(_ document: BSONDocument) throws -> EventModel<T> {
+    func decodeDocument<T: Codable>(_ document: BSONDocument) throws -> Event<T> {
         do {
-            return try self.decoder.decode(EventModel<T>.self, from: document.toData())
+            return try self.decoder.decode(Event<T>.self, from: document.toData())
         }catch {
-            
-            let encoder = BSONEncoder()
-            encoder.dateEncodingStrategy = .iso8601
-            encoder.uuidEncodingStrategy = .deferredToUUID
             
             guard
                 let payload = document["payload"],
@@ -109,36 +73,38 @@ public final class Client {
                 let newPayload: BSON = (T.self == String.self) ? .string(jsonString) : .document(try .init(fromJSON: jsonString))
             else { throw  DecodingError.typeMismatch(T.self, DecodingError.Context.init(codingPath: [], debugDescription: "")) }
             
-            
             var tempDocument = document
             tempDocument["payload"] = newPayload
             
-            return try self.decoder.decode(EventModel<T>.self, from: tempDocument.toData())
+            return try self.decoder.decode(Event<T>.self, from: tempDocument.toData())
         }
         
     }
     
-    private func handle<T>(_ event: EventModel<T>) throws -> EventLoopFuture<Void>{
-        guard let subscription = self.subscriptions[event.topic] else {
-            throw Subscription.topicNotFound()
-        }
-        
-        let promises = subscription.actions.map { action in
-            return action(event.payload)
-        }
-        
-        return self.executionStrategy.exec(promises, on: self.eventLoop)
-            .flatMap { _ -> EventLoopFuture<UpdateResult?> in
-                self.writeAck(for: event)
-            }.map { (result: UpdateResult?) in
-                self.logger.debug("Ack sent for \(event.topic)")
-            }.flatMapErrorThrowing { error in
-                self.logger.report(error: error)
-                throw error
+    private func handle<T>(_ event: Event<T>) -> EventLoopFuture<Void>{
+        self.eventLoop.submit{
+            guard let subscription = self.subscriptions[event.topic] else {
+                throw Subscription.topicNotFound()
             }
+            
+            return subscription.actions.map{ action in action(event.payload) }
+        }
+        .flatMap{ promises in
+            self.executionStrategy.exec(promises, on: self.eventLoop)
+        }
+        .flatMap { _ -> EventLoopFuture<UpdateResult?> in
+            self.writeAck(for: event)
+        }
+        .map { (result: UpdateResult?) in
+            self.logger.debug("Ack sent for \(event._id.objectIDValue?.description ?? "") on \(event.topic)")
+        }
+        .flatMapErrorThrowing { error in
+            self.logger.report(error: error)
+            throw error
+        }
     }
     
-    private func writeAck<T>(for event: EventModel<T>) -> EventLoopFuture<UpdateResult?> {
+    private func writeAck<T>(for event: Event<T>) -> EventLoopFuture<UpdateResult?> {
         let query: BSONDocument = ["_id": event._id]
         
         let ack: BSON = .init(stringLiteral: self.clientName)
@@ -161,11 +127,16 @@ public final class Client {
                           topic == collection.name,
                           let acks = document["acks"]?.arrayValue,
                           !acks.contains(.string(self.clientName))
-                    else { return }
+                    else {
+                        return
+                    }
                     
-                    let event: EventModel<T> = try self.decodeDocument(document)
+                    let event: Event<T> = try self.decodeDocument(document)
                     
-                    try self.handle(event).wait()
+                    try self.eventChallenge(event: event)
+                        .flatMap(self.handle)
+                        .wait()
+                    
                 }
                 .flatMapError{ error in
                     self.logger.report(error: error)
@@ -209,26 +180,35 @@ public final class Client {
                     }
                 }
             }
-            .map { (events: [EventModel<T>]) in 
-                events.map { event in
-                    do {
-                        return try self.handle(event)
+            .flatMap{ (events: [Event<T>]) in
+                let promises = events.map(self.eventChallenge)
+                return EventLoopFuture.whenAllComplete(promises, on: self.eventLoop)
+            }
+            .map{ (results: [Result<Event<T>, Error>]) in
+                results.compactMap{
+                    guard case let .success(event) = $0
+                    else {
+                        if case let .failure(error) = $0 {
+                            self.logger.report(error: error)
+                        }
+                        return nil
                     }
-                    catch {
-                        return self.eventLoop.makeSucceededFuture( () )
-                    }
+                    return event
                 }
             }
-            .flatMap { (executions: [EventLoopFuture<Void>]) in
-                EventLoopFuture.whenAllSucceed(executions, on: self.eventLoop)
+            .map { (events: [Event<T>]) in
+                events.map { self.handle($0) }
             }
-            .map {_ in ( )}
+            .flatMap { (executions: [EventLoopFuture<Void>]) in
+                EventLoopFuture.whenAllComplete(executions, on: self.eventLoop)
+            }
+            .map { _ in }
     }
     
     private func createTTL(collection: MongoCollection<BSONDocument>) -> EventLoopFuture<String> {
         var options = IndexOptions()
         options.name = "expire"
-        options.expireAfterSeconds = self.defaultTTL
+        options.expireAfterSeconds = 1
         let index = IndexModel(keys: ["expireAt": 1], options: options)
         return collection.createIndex(index)
     }
@@ -243,6 +223,7 @@ public final class Client {
         }
     }
     
+    @discardableResult
     public func subscribe<T>(to topic: String, action: @escaping (T) -> EventLoopFuture<Void>) -> EventLoopFuture<Void> where T: Codable {
         let collection = self.database.collection(topic)
         
@@ -269,7 +250,7 @@ public final class Client {
     public static func publish<T>(_ object: T, broker: Client, to topic: String) -> EventLoopFuture<Void> where T: Codable {
         
         let collection = broker.database.collection(topic)
-        let event = EventModel(topic: topic, payload: object, expireIn: broker.defaultTTL)
+        let event = Event(topic: topic, payload: object, expireIn: broker.defaultTTL)
         return broker.eventLoop.submit {
             try broker.encoder.encode(event)
         }
