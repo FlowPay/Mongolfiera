@@ -103,7 +103,7 @@ final class MongolFieraTests: XCTestCase {
     func testRecoverWithoutPublish() throws{
         let exp = expectation(description: "Recovering")
         
-        let event: EventModel<String> = EventModel(topic: "lib/test-recovered-np", payload: "hello")
+        let event: Event<String> = Event(topic: "lib/test-recovered-np", payload: "hello")
         
         let connection = try MongoClient("mongodb://192.168.2.55:30000/?replicaSet=rs0", using: self.loop!)
         let db = connection.db("test")
@@ -173,7 +173,7 @@ final class MongolFieraTests: XCTestCase {
             
             guard  let document = try? result.get(),
                    let data = try? BSONEncoder().encode(document),
-                   var event = try? BSONDecoder().decode(EventModel<TestPayload>.self, from: data) else {
+                   var event = try? BSONDecoder().decode(Event<TestPayload>.self, from: data) else {
                 XCTFail()
                 return
             }
@@ -244,7 +244,7 @@ final class MongolFieraTests: XCTestCase {
                 print(event)
                 let payload = try JSONDecoder().decode(TestPayload.self, from: event.data(using: .utf8)!)
                 print(payload)
-                exfp.fulfill()
+                exp.fulfill()
                 return
             }
 
