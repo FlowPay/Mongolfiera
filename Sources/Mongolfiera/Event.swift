@@ -1,6 +1,6 @@
 //
 //  Event.swift
-//  
+//
 //
 //  Created by Federico Giuntoli on 11/08/20.
 //
@@ -15,15 +15,19 @@ public struct Event<T>: Codable where T: Codable {
     let timestamp: Double
     let payload: T
     let expireAt: Double
+    let expireDate: Date?
     var read: [String] = []
     var acks: [String] = []
     
     public init(topic: String, payload: T, expireIn: TimeInterval = 300) {
         self._id = .objectID()
-        self.topic = topic
-        self.timestamp = Date().timeIntervalSince1970
         self.payload = payload
+        
+        self.topic = topic
+        
+        self.timestamp = Date().timeIntervalSince1970
         self.expireAt = self.timestamp + expireIn
+        self.expireDate = Date(timeIntervalSince1970: self.timestamp + expireIn)
     }
     
 }
