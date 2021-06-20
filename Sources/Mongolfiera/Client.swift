@@ -208,7 +208,7 @@ public final class Client {
         var options = IndexOptions()
         options.name = "expire"
         options.expireAfterSeconds = 1
-        let index = IndexModel(keys: ["expireAt": 1], options: options)
+        let index = IndexModel(keys: ["expireDate": 1], options: options)
         return collection.createIndex(index)
     }
     
