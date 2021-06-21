@@ -20,6 +20,20 @@ public final class Client {
     
     public var logger: Logger = .init(label: "MongoDB-Broker")
     
+    public var encoder: BSONEncoder = {
+        let bsonEncoder = BSONEncoder()
+        bsonEncoder.dateEncodingStrategy = .bsonDateTime
+        bsonEncoder.uuidEncodingStrategy = .deferredToUUID
+        return bsonEncoder
+    }()
+    
+    public var decoder: BSONDecoder = {
+        let bsonDecoder = BSONDecoder()
+        bsonDecoder.dateDecodingStrategy = .bsonDateTime
+        bsonDecoder.uuidDecodingStrategy = .deferredToUUID
+        return bsonDecoder
+    }()
+    
     var watching: Bool {
         subscriptions.values.first(where: {$0.watching}) != nil
     }
@@ -27,21 +41,6 @@ public final class Client {
     var recovering: Bool {
         subscriptions.values.first(where: {$0.recovering}) != nil
     }
-    
-    let encoder: BSONEncoder = {
-        let bsonEncoder = BSONEncoder()
-        bsonEncoder.dateEncodingStrategy = .iso8601
-        bsonEncoder.uuidEncodingStrategy = .deferredToUUID
-        return bsonEncoder
-    }()
-    
-    
-    let decoder: BSONDecoder = {
-        let bsonDecoder = BSONDecoder()
-        bsonDecoder.dateDecodingStrategy = .iso8601
-        bsonDecoder.uuidDecodingStrategy = .deferredToUUID
-        return bsonDecoder
-    }()
     
     public init(connection: MongoClient, dbName: String, as clientName: String, eventLoop: EventLoop, useTransactions: Bool? = true) {
         self.eventLoop = eventLoop
@@ -209,7 +208,7 @@ public final class Client {
         var options = IndexOptions()
         options.name = "expire"
         options.expireAfterSeconds = 1
-        let index = IndexModel(keys: ["expireAt": 1], options: options)
+        let index = IndexModel(keys: ["expire": 1], options: options)
         return collection.createIndex(index)
     }
     
