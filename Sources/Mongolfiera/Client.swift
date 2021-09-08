@@ -150,7 +150,7 @@ public final class Client {
                 watcher.kill()
             }
             .flatMapError{ error in
-                self.logger.report(error: error)
+                //self.logger.report(error: error)
                 return self.watch(collection, of: type)
             }
         
