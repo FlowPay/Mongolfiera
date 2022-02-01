@@ -12,12 +12,12 @@ public enum ExecutionStrategy{
     case failFast
     case failSlow
     
-    func exec(_ futures: [EventLoopFuture<Void>], on loop: EventLoop) -> EventLoopFuture<Void>{
+    func exec(_ futures: TaskGroup<Bool>, on loop: EventLoop) async throws -> Void {
         switch self {
         case .failFast:
-            return self.failFastExec(futures, on: loop)
+            return await self.failFastExec(futures)
         case .failSlow:
-            return self.failSlowExec(futures, on: loop)
+            return try await self.failSlowExec(futures)
         }
     }
     

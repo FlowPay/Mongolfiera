@@ -80,136 +80,124 @@ public final class Client {
         
     }
     
-    private func handle<T>(_ event: Event<T>) -> EventLoopFuture<Void>{
-        self.eventLoop.submit{
-            guard let subscription = self.subscriptions[event.topic] else {
-                throw Subscription.topicNotFound()
-            }
-            
-            return subscription.actions.map{ action in action(event.payload) }
+    private func handle<T>(_ event: Event<T>) async throws {
+        guard let subscription = self.subscriptions[event.topic] else {
+            throw Subscription.topicNotFound()
         }
-        .flatMap{ promises in
-            self.executionStrategy.exec(promises, on: self.eventLoop)
+        await withTaskGroup(of: Bool.self) { taskGroup in
+                for action in subscription.actions {
+                    taskGroup.addTask {
+                        do {
+                            try await action(event.payload)
+                            return true
+                        } catch let error {
+                            self.logger.report(error: error)
+                            return false
+                        }
+                    }
+                }
+            try! await self.executionStrategy.exec(taskGroup, on: self.eventLoop)
         }
-        .flatMap { _ -> EventLoopFuture<UpdateResult?> in
-            self.writeAck(for: event)
-        }
-        .map { (result: UpdateResult?) in
+        do {
+            try await self.writeAck(for: event)
             self.logger.debug("Ack sent for \(event._id.objectIDValue?.description ?? "") on \(event.topic)")
-        }
-        .flatMapErrorThrowing { error in
+        } catch let error {
             self.logger.report(error: error)
             throw error
         }
+        
     }
     
-    private func writeAck<T>(for event: Event<T>) -> EventLoopFuture<UpdateResult?> {
+    private func writeAck<T>(for event: Event<T>) async throws -> UpdateResult? {
         let query: BSONDocument = ["_id": event._id]
-        
         let ack: BSON = .init(stringLiteral: self.clientName)
         let collection = self.database.collection(event.topic)
-        return collection.updateOne(
+        return try await collection.updateOne(
             filter: query,
             update: [ "$push": [ "acks": ack] ]
         )
     }
     
-    private func watch<T: Codable>(_ collection: MongoCollection<Document>, of type: T.Type) -> EventLoopFuture<Void> {
-        
-        collection.watch()
-            .flatMap { watcher in
-                watcher.forEach{ notification in
-                    
-                    guard notification.operationType == .insert,
-                          let document = notification.fullDocument,
-                          let topic = document["topic"]?.stringValue,
-                          topic == collection.name,
-                          let acks = document["acks"]?.arrayValue,
-                          !acks.contains(.string(self.clientName))
-                    else {
-                        return
-                    }
-                    
-                    let event: Event<T> = try self.decodeDocument(document)
-                    
-                    try self.eventChallenge(event: event)
-                        .flatMap(self.handle)
-                        .wait()
-                    
-                }
-                .flatMapError{ error in
-                    self.logger.report(error: error)
-                    return watcher.kill().flatMapThrowing{ _ in throw error }
-                }
-                .map{ _ in
-                    watcher
-                }
-            }
+//    private func watch<T: Codable>(_ collection: MongoCollection<Document>, of type: T.Type) -> EventLoopFuture<Void> {
+//
+//        collection.watch()
+//            .flatMap { watcher in
+//                watcher.forEach{ notification in
+//
+//                    guard notification.operationType == .insert,
+//                          let document = notification.fullDocument,
+//                          let topic = document["topic"]?.stringValue,
+//                          topic == collection.name,
+//                          let acks = document["acks"]?.arrayValue,
+//                          !acks.contains(.string(self.clientName))
+//                    else {
+//                        return
+//                    }
+//
+//                    let event: Event<T> = try self.decodeDocument(document)
+//
+//                    try self.eventChallenge(event: event)
+//                        .flatMap(self.handle)
+//                        .wait()
+//
+//                }
+//                .flatMapError{ error in
+//                    self.logger.report(error: error)
+//                    return watcher.kill().flatMapThrowing{ _ in throw error }
+//                }
+//                .map{ _ in
+//                    watcher
+//                }
+//            }
+//
+//            .flatMap{ (watcher: ChangeStream<ChangeStreamEvent<BSONDocument>>) in
+//                watcher.kill()
+//            }
+//            .flatMapError{ error in
+//                //self.logger.report(error: error)
+//                return self.watch(collection, of: type)
+//            }
+//
+//    }
+    
+    private func watch<T: Codable>(_ collection: MongoCollection<Document>, of type: T.Type) async throws {
+        let watcher =  try await collection.watch()
+        for try await notification in watcher {
             
-            .flatMap{ (watcher: ChangeStream<ChangeStreamEvent<BSONDocument>>) in
-                watcher.kill()
-            }
-            .flatMapError{ error in
-                //self.logger.report(error: error)
-                return self.watch(collection, of: type)
-            }
-        
+        }
     }
     
-    private func recoverEvents<T:Codable>(on topic: String, as: T.Type) -> EventLoopFuture<Void>{
+    private func recoverEvents<T:Codable>(on topic: String, as: T.Type) async throws {
         let ack: BSON = .init(stringLiteral: self.clientName)
         let query: BSONDocument = ["acks": ["$nin" : [ack]]]
         
-        return self.database.collection(topic)
-            .find(query)
-            .flatMap { (cursor: MongoCursor<BSONDocument>) in
-                cursor.toArray().and(value: cursor)
+        let cursor = try await self.database.collection(topic).find(query)
+        let cursors = try await cursor.toArray()
+        try await cursor.kill().get()
+        let events : [Event<T>] = cursors.compactMap { event in
+            do {
+                return try self.decodeDocument(event)
             }
-            .flatMap { (array, cursor) in
-                cursor.kill().map{ _ in array}
+            catch let error {
+                self.logger.report(error: error)
+                return nil
             }
-            .map { events in
-                events.compactMap { event in
-                    do {
-                        return try self.decodeDocument(event)
-                    }
-                    catch let error {
-                        self.logger.report(error: error)
-                        return nil
-                    }
+        }
+        return try await withThrowingTaskGroup(of: Void.self) { taskGroup in
+            taskGroup.addTask {
+                for event in events {
+                    return try await self.handle(event)
                 }
             }
-            .flatMap{ (events: [Event<T>]) in
-                let promises = events.map(self.eventChallenge)
-                return EventLoopFuture.whenAllComplete(promises, on: self.eventLoop)
-            }
-            .map{ (results: [Result<Event<T>, Error>]) in
-                results.compactMap{
-                    guard case let .success(event) = $0
-                    else {
-                        if case let .failure(error) = $0 {
-                            self.logger.report(error: error)
-                        }
-                        return nil
-                    }
-                    return event
-                }
-            }
-            .map { (events: [Event<T>]) in
-                events.map { self.handle($0) }
-            }
-            .flatMap { (executions: [EventLoopFuture<Void>]) in
-                EventLoopFuture.whenAllComplete(executions, on: self.eventLoop)
-            }
-            .map { _ in }
+        }
     }
     
-    private func createTTL(collection: MongoCollection<BSONDocument>) -> EventLoopFuture<String> {
+    private func createTTL(collection: MongoCollection<BSONDocument>) async throws -> String {
         var options = IndexOptions()
         options.name = "expire"
         options.expireAfterSeconds = 1
         let index = IndexModel(keys: ["expire": 1], options: options)
-        return collection.createIndex(index)
+        return try await collection.createIndex(index).get()
     }
     
     public func unsubscribe(from topic: String){
@@ -244,6 +232,14 @@ public final class Client {
         self.subscriptions[topic]?.watchers.append(watcher)
         
         return recover.flatMap { watcher }
+    }
+    
+    public func subscribe<T>(to topic: String, action: @escaping (T) async throws -> Void) async throws -> Void where T: Codable {
+        let collection = self.database.collection(topic)
+        let anyFunction = (Any) async throws -> Void = { object in
+            return action(object as! T)
+        }
+        
     }
     
     public static func publish<T>(_ object: T, broker: Client, to topic: String) -> EventLoopFuture<Void> where T: Codable {

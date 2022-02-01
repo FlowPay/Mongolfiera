@@ -10,8 +10,10 @@ import NIO
 
 extension ExecutionStrategy{
     
-    func failFastExec(_ futures: [EventLoopFuture<Void>], on loop: EventLoop) -> EventLoopFuture<Void>{
-        return EventLoopFuture.andAllSucceed(futures, on: loop)
+    func failFastExec(_ futures: TaskGroup<Bool>) async -> Void {
+        for await future in futures {
+            if !future { futures.cancelAll() }
+        }
     }
     
 }

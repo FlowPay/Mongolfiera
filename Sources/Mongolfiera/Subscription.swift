@@ -9,15 +9,15 @@ import Foundation
 import NIO
 import MongoSwift
 
-typealias GenericFunction = (Any) -> EventLoopFuture<Void>
+typealias GenericFunction = (Any) async throws -> Void
 
 struct Subscription: Identifiable {
     
     public let topic: String
     
-    var recovers: [EventLoopFuture<Void>] = []
-    var watchers: [EventLoopFuture<Void>] = []
-    var actions: [GenericFunction] = []
+    var recovers: [Void] = []
+    var watchers: [Void] = []
+    var actions: [(Any) async throws -> Void] = []
     
     var watching: Bool {
         watchers.count > 0

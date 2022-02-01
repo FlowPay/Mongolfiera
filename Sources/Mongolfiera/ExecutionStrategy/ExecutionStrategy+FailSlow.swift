@@ -10,8 +10,14 @@ import NIO
 
 extension ExecutionStrategy{
     
-    func failSlowExec(_ futures: [EventLoopFuture<Void>], on loop: EventLoop) -> EventLoopFuture<Void>{
-        return EventLoopFuture.andAllComplete(futures, on: loop)
+    struct SlowExecError: Error { }
+    
+    func failSlowExec(_ futures: TaskGroup<Bool>) async throws {
+        var results = [Bool]()
+        for await future in futures {
+            results.append(future)
+        }
+        if !(results.allSatisfy{ $0 }) { throw SlowExecError() }
     }
     
 }
