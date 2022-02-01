@@ -246,6 +246,17 @@ public final class Client {
         return recover.flatMap { watcher }
     }
     
+    public func subscribe<T>(to topic: String, action: @escaping (T) async throws -> Void) -> EventLoopFuture<Void> where T: Codable {
+        let anyFunction: (T) -> EventLoopFuture<Void> = { object in
+            let promise: EventLoopPromise<Void> = self.eventLoop.makePromise()
+            promise.completeWithTask {
+                try await action(object)
+            }
+            return promise.futureResult
+        }
+        return self.subscribe(to: topic, action: anyFunction)
+    }
+    
     public static func publish<T>(_ object: T, broker: Client, to topic: String) -> EventLoopFuture<Void> where T: Codable {
         
         let collection = broker.database.collection(topic)
