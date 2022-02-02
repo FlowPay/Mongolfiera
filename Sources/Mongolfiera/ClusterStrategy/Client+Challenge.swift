@@ -10,10 +10,10 @@ import NIO
 import MongoSwift
 
 extension Client {
-    func eventChallenge<T>(event: Event<T>) -> EventLoopFuture<Event<T>> {
+    func eventChallenge<T>(event: Event<T>) async throws -> Event<T> {
         
         guard self.clusterStrategy == .allSubscribed
-        else { return self.eventLoop.makeSucceededFuture(event) }
+        else { return event }
         
         let clientName = BSON.string(self.clientName)
         
@@ -24,17 +24,14 @@ extension Client {
         
         let updateQuery: BSONDocument = [ "$push": [ "read": clientName] ]
         
-        return self.database.collection(event.topic)
+        let document = try await self.database.collection(event.topic)
             .findOneAndUpdate(filter: filterQuery, update: updateQuery)
-            .flatMapThrowing{ document in
-                guard let document = document
-                else {
-                    let error = ChallengeError(topic: event.topic, eventID: event._id.objectIDValue?.description)
-                    self.logger.report(error: error)
-                    throw error
-                }
-                return try self.decodeDocument(document)
-            }
+        guard let document = document else {
+            let error = ChallengeError(topic: event.topic, eventID: event._id.objectIDValue?.description)
+            self.logger.report(error: error)
+            throw error
+        }
+        return try self.decodeDocument(document)
     }
     
 }

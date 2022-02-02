@@ -53,60 +53,48 @@ final class MongolFieraTests: XCTestCase {
         return client
     }
     
-    func publishTest(test: TestPayload) -> EventLoopFuture<Void> {
+    func publishTest(test: TestPayload) async throws -> Void {
         let client = connect(as: "MongolfieraTest-sender-\(test.test)")
-        return client.publish(test, to: "lib/test")
+        return try await Client.publish(test, broker: client, to: "lib/test")
     }
     
-    func testGeneric(){
+    func testGeneric() async throws -> Void {
         let exp = expectation(description: "Loading stories")
-        
         let testObject = TestPayload()
-        
         let client = connect(as: "MongolfieraTest")
-        client.subscribe(to: "lib/test"){ (result: TestPayload) in
+        try await client.subscribe(to: "lib/test") {(result: TestPayload) in
             if result.test == testObject.test{
                 exp.fulfill()
             }
-            return self.loop!.next().makeSucceededFuture(())
-        }.map{ _ in
-            print("Subscription closed")
+            return
         }
-        
-        self.publishTest(test: testObject)
-        
-        waitForExpectations(timeout: 10)
     }
     
-    func testRecover(){
+    func testRecover() async throws {
         let exp = expectation(description: "Recovering")
         exp.expectedFulfillmentCount = 2
-        
         let client = connect(as: "Mongolfiera-RecoveringTest")
-        _ = client.publish("hello", to: "lib/test-recovered").flatMap{
-            
-            client.subscribe(to: "lib/test-recovered"){ (payload: String) in
-                XCTAssertTrue(client.recovering)
-                exp.fulfill()
-                return self.loop!.next().makeSucceededFuture(())
-            }
-        }
-        self.loop?.execute {
-            while client.recovering{
-                sleep(2)
-            }
+        try await Client.publish("hello", broker: client, to: "lib/test-recovered")
+        try await client.subscribe(to: "lib/test-recovered"){ (payload: String) in
+            XCTAssertTrue(client.recovering)
             exp.fulfill()
+            return
         }
-        waitForExpectations(timeout: 10)
+        while client.recovering {
+            sleep(2)
+        }
+        
+        await waitForExpectations(timeout: 10)
     }
     
-    func testRecoverWithoutPublish() throws{
+    
+    func testRecoverWithoutPublish() async throws{
         let exp = expectation(description: "Recovering")
         
         let event: Event<String> = Event(topic: "lib/test-recovered-np", payload: "hello")
         
         let connection = self.connect()
-        _ = connection.database.createCollection("lib/test-recovered-np")
+        _ = await try connection.database.createCollection("lib/test-recovered-np")
         let collection = connection.database.collection("lib/test-recovered-np")
         
         let data = try BSONEncoder().encode(event)
@@ -114,64 +102,54 @@ final class MongolFieraTests: XCTestCase {
                 
         let client = connect(as: "Mongolfiera-RecoveringNPTest")
         
-        _ = client.subscribe(to: "lib/test-recovered-np"){ (payload: String) in
+        _ = try await client.subscribe(to: "lib/test-recovered-np"){ (payload: String) in
             XCTAssertTrue(client.recovering)
             XCTAssertEqual(payload, "hello")
             exp.fulfill()
-            return self.loop!.next().makeSucceededFuture(())
+            return
         }
         
-        waitForExpectations(timeout: 10)
+        await waitForExpectations(timeout: 10)
         
     }
     
-    func testDelayedPublish(){
+    func testDelayedPublish() async throws {
         let exp = expectation(description: "Wait for acks")
         let attemps = 20
         let delayMillis = 200
         let payloadTest = TestPayload()
-        
         exp.expectedFulfillmentCount = attemps
-        
         var uuids: [String] = []
         var uuidsTest: [String] = []
-        
         var client: Client? = nil
-        
         client = connect(as: "MongolfieraTest-\(payloadTest.test)")
-        client!.subscribe(to: "lib/test"){ (result: TestPayload) in
+        try await client!.subscribe(to: "lib/test") { (result: TestPayload) in
             print("Ricevo \(result.test)")
-            
             uuidsTest.append(result.test)
             exp.fulfill()
-            return self.loop!.next().makeSucceededFuture(())
-            
+            return
         }
-        
         var counter = 0
-        let anotherLoop = MultiThreadedEventLoopGroup(numberOfThreads: System.coreCount).next()
-        anotherLoop.scheduleRepeatedTask(initialDelay: TimeAmount.minutes(0), delay: TimeAmount.milliseconds(Int64(delayMillis))) { task in
-            
-            counter += 1
-            
-            let testData = TestPayload()
-            uuids.append(testData.test)
-            
-            let client = self.connect(as: "MongolfieraTest-\(counter)-\(payloadTest.test)", on: anotherLoop)
-            
-            print("Invio \(testData.test)")
-            client.publish(testData, to: "lib/test").whenSuccess{
-                if counter == attemps {
-                    task.cancel()
-                }
+        try await withThrowingTaskGroup(of: Void.self) { taskGroup in
+            while counter < 200 {
+                counter += 1
+                let testData = TestPayload()
+                uuids.append(testData.test)
+                let client = self.connect(as: "MongolfieraTest-\(counter)-\(payloadTest.test)")
+                print("Invio \(testData.test)")
+                try await Client.publish(testData, broker: client, to: "lib/test")
+                if counter == attemps { taskGroup.cancelAll() }
             }
-            
         }
-        
-        waitForExpectations(timeout: TimeInterval(attemps * min(1, delayMillis/1000) + 60))
+        await waitForExpectations(timeout: TimeInterval(attemps * min(1, delayMillis/1000) + 60))
         XCTAssertEqual(uuids.sorted(), uuidsTest.sorted())
     }
     
+    func testWrongModel() throws {
+        let exp = expectation(description: "Waiting for approval")
+        let client = connect(as: "MongolfieraTest-WrongModel")
+        client.clusterStrategy = .none
+    }
     
     func testWrongModel() throws {
         let exp = expectation(description: "Waiting for approval")

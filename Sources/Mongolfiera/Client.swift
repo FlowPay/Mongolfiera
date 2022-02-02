@@ -118,52 +118,33 @@ public final class Client {
         )
     }
     
-//    private func watch<T: Codable>(_ collection: MongoCollection<Document>, of type: T.Type) -> EventLoopFuture<Void> {
-//
-//        collection.watch()
-//            .flatMap { watcher in
-//                watcher.forEach{ notification in
-//
-//                    guard notification.operationType == .insert,
-//                          let document = notification.fullDocument,
-//                          let topic = document["topic"]?.stringValue,
-//                          topic == collection.name,
-//                          let acks = document["acks"]?.arrayValue,
-//                          !acks.contains(.string(self.clientName))
-//                    else {
-//                        return
-//                    }
-//
-//                    let event: Event<T> = try self.decodeDocument(document)
-//
-//                    try self.eventChallenge(event: event)
-//                        .flatMap(self.handle)
-//                        .wait()
-//
-//                }
-//                .flatMapError{ error in
-//                    self.logger.report(error: error)
-//                    return watcher.kill().flatMapThrowing{ _ in throw error }
-//                }
-//                .map{ _ in
-//                    watcher
-//                }
-//            }
-//
-//            .flatMap{ (watcher: ChangeStream<ChangeStreamEvent<BSONDocument>>) in
-//                watcher.kill()
-//            }
-//            .flatMapError{ error in
-//                //self.logger.report(error: error)
-//                return self.watch(collection, of: type)
-//            }
-//
-//    }
-    
     private func watch<T: Codable>(_ collection: MongoCollection<Document>, of type: T.Type) async throws {
         let watcher =  try await collection.watch()
         for try await notification in watcher {
-            
+            guard notification.operationType == .insert,
+                  let document = notification.fullDocument,
+                  let topic = document["topic"]?.stringValue,
+                  topic == collection.name,
+                  let acks = document["acks"]?.arrayValue,
+                  !acks.contains(.string(self.clientName))
+            else {
+                return
+            }
+            let event: Event<T> = try self.decodeDocument(document)
+            do {
+                let eventChallenge = try await self.eventChallenge(event: event)
+                return try await self.handle(eventChallenge)
+            } catch let error {
+                self.logger.report(error: error)
+                try await watcher.kill().get()
+                throw error
+            }
+        }
+        do {
+            try await watcher.kill().get()
+        }catch {
+            return try await self.watch(collection, of: type)
+        
         }
     }
     
@@ -211,52 +192,33 @@ public final class Client {
     }
     
     @discardableResult
-    public func subscribe<T>(to topic: String, action: @escaping (T) -> EventLoopFuture<Void>) -> EventLoopFuture<Void> where T: Codable {
+    public func subscribe<T>(to topic: String, action: @escaping (T) async throws -> Void) async throws -> Void where T: Codable {
         let collection = self.database.collection(topic)
         
-        let anyFunction: (Any) -> EventLoopFuture<Void> = { object in
-            return action(object as! T)
+        let anyFunction: (Any) async throws -> Void = { object in
+            return try await action(object as! T)
         }
         
         if self.subscriptions[topic] == nil {
-            _ =  self.createTTL(collection: collection)
+            _ = try await self.createTTL(collection: collection)
             self.subscriptions[topic] = Subscription(topic: topic)
         }
         
         self.subscriptions[topic]?.actions.append(anyFunction)
         
-        let recover = self.recoverEvents(on: topic, as: T.self)
-        let watcher = self.watch(collection, of: T.self)
+        let recover = try await self.recoverEvents(on: topic, as: T.self)
+        let watcher = try await self.watch(collection, of: T.self)
         
         self.subscriptions[topic]?.recovers.append(recover)
         self.subscriptions[topic]?.watchers.append(watcher)
-        
-        return recover.flatMap { watcher }
     }
     
-    public func subscribe<T>(to topic: String, action: @escaping (T) async throws -> Void) async throws -> Void where T: Codable {
-        let collection = self.database.collection(topic)
-        let anyFunction = (Any) async throws -> Void = { object in
-            return action(object as! T)
-        }
-        
-    }
-    
-    public static func publish<T>(_ object: T, broker: Client, to topic: String) -> EventLoopFuture<Void> where T: Codable {
-        
+    public static func publish<T>(_ object: T, broker: Client, to topic: String) async throws -> Void where T: Codable {
         let collection = broker.database.collection(topic)
         let event = Event(topic: topic, payload: object, expireIn: broker.defaultTTL)
-        return broker.eventLoop.submit {
-            try broker.encoder.encode(event)
-        }
-        .flatMap { document in
-            collection.insertOne(document)
-        }
-        .map{ _ in }
-    }
-    
-    public func publish<T>(_ object: T, to topic: String) -> EventLoopFuture<Void>  where T: Codable {
-        Client.publish(object, broker: self, to: topic)
+        let document = try broker.encoder.encode(event)
+        try await collection.insertOne(document)
+        return
     }
     
 }
